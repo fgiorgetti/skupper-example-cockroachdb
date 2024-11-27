@@ -1,9 +1,16 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: east
+---
 apiVersion: v1
 kind: Service
 metadata:
   # This service is meant to be used by clients of the database. It exposes a ClusterIP that will
   # automatically load balance connections to the different database pods.
   name: cockroachdb-public
+  namespace: east
   labels:
     app: cockroachdb
 spec:
@@ -27,7 +34,8 @@ metadata:
   # set such that they can resolve each other's IP addresses. It does not
   # create a load-balanced ClusterIP and should not be used directly by clients
   # in most circumstances.
-  name: cockroachdb-internal-g2
+  name: cockroachdb-internal-g1
+  namespace: east
   labels:
     app: cockroachdb
   annotations:
@@ -60,6 +68,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: cockroachdb-budget
+  namespace: east
   labels:
     app: cockroachdb
 spec:
@@ -71,9 +80,10 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: cockroachdb-g2
+  name: cockroachdb-g1
+  namespace: east
 spec:
-  serviceName: cockroachdb-internal-g2
+  serviceName: cockroachdb-internal-g1
   replicas: 3
   selector:
     matchLabels:
@@ -83,6 +93,9 @@ spec:
       labels:
         app: cockroachdb
     spec:
+      dnsConfig:
+        searches:
+        - cockroachdb-internal-g1.east.svc.cluster.local
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -110,6 +123,7 @@ spec:
         #   limits:
         #     cpu: "16"
         #     memory: "8Gi" 
+        #   limits:
         ports:
         - containerPort: 26257
           name: grpc
@@ -147,16 +161,14 @@ spec:
         command:
           - "/bin/bash"
           - "-ecx"
-          # The use of qualified `hostname -f` is crucial:
-          # Other nodes aren't able to look up the unqualified hostname.
           - exec
             /cockroach/cockroach
             start
             --logtostderr
             --insecure
             --http-addr 0.0.0.0
-            --advertise-addr $(hostname).cockroachdb-internal-g2
-            --join cockroachdb-g1-0.cockroachdb-internal-g1,cockroachdb-g1-1.cockroachdb-internal-g1,cockroachdb-g1-2.cockroachdb-internal-g1
+            --advertise-addr $(hostname)
+            --join cockroachdb-g1-0,cockroachdb-g1-1,cockroachdb-g1-2
             --cache $(expr $MEMORY_LIMIT_MIB / 4)MiB
             --max-sql-memory $(expr $MEMORY_LIMIT_MIB / 4)MiB
       # No pre-stop hook is required, a SIGTERM plus some time is all that's
@@ -178,3 +190,44 @@ spec:
       resources:
         requests:
           storage: 1Gi
+
+---
+apiVersion: skupper.io/v2alpha1
+kind: Site
+metadata:
+  name: east
+  namespace: east
+spec:
+  linkAccess: default
+---
+apiVersion: skupper.io/v2alpha1
+kind: AccessGrant
+metadata:
+  name: east-grant
+  namespace: east
+spec:
+  redemptionsAllowed: 10
+  expirationWindow: 1h
+---
+apiVersion: skupper.io/v2alpha1
+kind: Connector
+metadata:
+  name: g1
+  namespace: east
+spec:
+  routingKey: g1
+  port: 26257
+  selector: app=cockroachdb
+  exposePodsByName: true
+---
+apiVersion: skupper.io/v2alpha1
+kind: Listener
+metadata:
+  name: g2
+  namespace: east
+spec:
+  routingKey: g2
+  port: 26257
+  host: cockroachdb-internal-g2
+  exposePodsByName: true
+---
